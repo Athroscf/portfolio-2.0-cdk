@@ -119,7 +119,7 @@ export class PorfolioStack extends cdk.Stack {
             commands: ["pnpm install"],
           },
           build: {
-            commands: ["echo Build started on `date`", "pnpm run build", "pnpm run export"],
+            commands: ["echo Build started on `date`", "pnpm run build"],
           },
         },
         artifacts: {
