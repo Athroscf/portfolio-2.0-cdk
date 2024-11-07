@@ -5,6 +5,8 @@ import * as cf from "aws-cdk-lib/aws-cloudfront";
 import * as cfo from "aws-cdk-lib/aws-cloudfront-origins";
 import * as cp from "aws-cdk-lib/aws-codepipeline";
 import * as cpa from "aws-cdk-lib/aws-codepipeline-actions";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as r53t from "aws-cdk-lib/aws-route53-targets";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -30,11 +32,12 @@ export class PorfolioStack extends cdk.Stack {
       "resend-api-key",
     );
 
+    const prefix = props.environment === "dev" ? "Dev" : "Prod";
     const environmentPrefix = props.environment === "dev" ? "dev." : "";
     const fullDomain = `${environmentPrefix}${domainName}`;
 
     // S3 bucket to store the static website
-    const siteBucket = new s3.Bucket(this, "PortfolioBucket", {
+    const siteBucket = new s3.Bucket(this, `${prefix}PortfolioBucket`, {
       bucketName: `${fullDomain}-website`,
       websiteIndexDocument: "index.html",
       websiteErrorDocument: "404.html",
@@ -45,34 +48,69 @@ export class PorfolioStack extends cdk.Stack {
     });
 
     // Hosted Zone
-    const zone = route53.HostedZone.fromLookup(this, "PortfolioHostedZone", {
+    const zone = route53.HostedZone.fromLookup(this, `${prefix}"PortfolioHostedZone"`, {
       domainName,
       privateZone: false,
     });
 
     // ACM certificate
-    const certificate = new cm.Certificate(this, "PortfolioCertificate", {
+    const certificate = new cm.Certificate(this, `${prefix}PortfolioCertificate`, {
       domainName: fullDomain,
       validation: cm.CertificateValidation.fromDns(zone),
     });
 
+    // CloudFront Origin Access Identity
+    const originAccessIdentity = new cf.OriginAccessIdentity(this, `${prefix}OriginAccessIdentity`, {
+      comment: `OAI for ${fullDomain} website`,
+    });
+
+    siteBucket.addToResourcePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [siteBucket.arnForObjects("*")],
+      principals: [new iam.CanonicalUserPrincipal(originAccessIdentity.cloudFrontOriginAccessIdentityS3CanonicalUserId)]
+    }))
+
+    // Lambda Function for email sending
+    const emailFunction = new lambda.Function(this, `${prefix}OriginAccessIdentity`, {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset("lambda"),
+      environment: {
+        RESEND_API_KEY: process.env.RESEND_API_KEY || "",
+      },
+    });
+
+    // Create a secret to store the Lambda function URL
+    const functionUrlSecret = new sm.Secret(this, `${prefix}EmailFunctionSecret`, {
+      secretName: `${id}-${prefix}-function-url`,
+      description: "URL for the email sending Lambda Function",
+    });
+
+    // Create a function URL for the Lambda
+    const functionUrl = emailFunction.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.NONE,
+    });
+
+    // Store te function URL in the secret
+    new sm.CfnSecret(this, `${prefix}FunctionUrlSecretValue`, {
+      secretString: functionUrl.url,
+    })
+
     // CloudFront distribution
-    const distribution = new cf.Distribution(this, "PortfolioDistribution", {
+    const distribution = new cf.Distribution(this, `${prefix}PortfolioDistribution`, {
       defaultBehavior: {
-        origin: new cfo.S3StaticWebsiteOrigin(siteBucket),
+        origin: cfo.S3BucketOrigin.withOriginAccessControl(siteBucket),
         viewerProtocolPolicy: cf.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         functionAssociations: [
           {
-            function: new cf.Function(this, "UrlRewriteFunction", {
+            function: new cf.Function(this, `${prefix}UrlRewriteFunction`, {
               code: cf.FunctionCode.fromInline(`
                 function handler(event) {
                   var request = event.request;
                   var uri = request.uri;
 
-                  if (uri.endsWith('/')) {
-                    request.uri += 'index.html';
-                  } else if (!uri.includes('.')) {
-                    request.uri += '.html';
+                  if (uri.endsWith('/') || !uri.includes('.')) {
+                    request.uri = '/index.html';
                   }
 
                   return request;
@@ -100,14 +138,14 @@ export class PorfolioStack extends cdk.Stack {
     });
 
     // Route53 alias record for the CloudFront distribution
-    new route53.ARecord(this, "PortfolioAliasRecord", {
+    new route53.ARecord(this, `${prefix}PortfolioAliasRecord`, {
       recordName: fullDomain,
       target: route53.RecordTarget.fromAlias(new r53t.CloudFrontTarget(distribution)),
       zone,
     });
 
     // CodeBuild project
-    const buildProject = new cb.PipelineProject(this, "PortfolioBuildProject", {
+    const buildProject = new cb.PipelineProject(this, `${prefix}PortfolioBuildProject`, {
       buildSpec: cb.BuildSpec.fromObject({
         version: "0.2",
         phases: {
@@ -116,10 +154,17 @@ export class PorfolioStack extends cdk.Stack {
             commands: ["npm install -g pnpm@latest"],
           },
           pre_build: {
-            commands: ["pnpm install"],
+            commands: [
+              "pnpm install",
+              "export FUNCTION_URL=$(aws secretsmanager get-secret-value --secret-id ${functionUrlSecret.secretName} --query SecretString --output text)",
+            ],
           },
           build: {
-            commands: ["echo Build started on `date`", "pnpm run build"],
+            commands: [
+              "echo Build started on `date`",
+              "echo FUNCTION_URL=$FUNCTION_URL",
+              "FUNCTION_URL=$FUNCTION_URL pnpm run build",
+            ],
           },
         },
         artifacts: {
@@ -144,9 +189,10 @@ export class PorfolioStack extends cdk.Stack {
     // Grant permissions
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     resendApiSecret.grantRead(buildProject.role!);
+    functionUrlSecret.grantRead(buildProject.role!);
 
     // CodePipeline
-    const pipeline = new cp.Pipeline(this, "PortfolioPipeline", {
+    const pipeline = new cp.Pipeline(this, `${prefix}PortfolioPipeline`, {
       pipelineName: "PortfolioPipeline",
     });
 
@@ -188,7 +234,7 @@ export class PorfolioStack extends cdk.Stack {
     });
 
     // Create a custom action to invalidate CloudFront cache
-    const invalidateCacheProject = new cb.PipelineProject(this, "InvalidateCacheProject", {
+    const invalidateCacheProject = new cb.PipelineProject(this, `${prefix}InvalidateCacheProject`, {
       buildSpec: cb.BuildSpec.fromObject({
         version: "0.2",
         phases: {
@@ -239,6 +285,11 @@ export class PorfolioStack extends cdk.Stack {
     new cdk.CfnOutput(this, "DistributionDomainName", {
       value: distribution.distributionDomainName,
       description: "CloudFront Distribution Domain Name",
+    });
+
+    new cdk.CfnOutput(this, "FunctionUrl", {
+      value: functionUrl.url,
+      description: "Lambda Function URL",
     });
   }
 }
