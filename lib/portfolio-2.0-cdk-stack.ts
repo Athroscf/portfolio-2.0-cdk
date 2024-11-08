@@ -45,6 +45,7 @@ export class PorfolioStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      encryption: s3.BucketEncryption.S3_MANAGED,
     });
 
     // Hosted Zone
@@ -64,14 +65,8 @@ export class PorfolioStack extends cdk.Stack {
       comment: `OAI for ${fullDomain} website`,
     });
 
-    siteBucket.addToResourcePolicy(new iam.PolicyStatement({
-      actions: ["s3:GetObject"],
-      resources: [siteBucket.arnForObjects("*")],
-      principals: [new iam.CanonicalUserPrincipal(originAccessIdentity.cloudFrontOriginAccessIdentityS3CanonicalUserId)]
-    }))
-
     // Lambda Function for email sending
-    const emailFunction = new lambda.Function(this, `${prefix}OriginAccessIdentity`, {
+    const emailFunction = new lambda.Function(this, `${prefix}EmailFunction`, {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset("lambda"),
@@ -137,6 +132,18 @@ export class PorfolioStack extends cdk.Stack {
       certificate,
     });
 
+    // Update S3 bucket policy for OAC
+    siteBucket.addToResourcePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [siteBucket.arnForObjects("*")],
+      principals: [new iam.CanonicalUserPrincipal(originAccessIdentity.cloudFrontOriginAccessIdentityS3CanonicalUserId)],
+      conditions: {
+        StringEquals: {
+          "AWS:SourceArn": `arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`
+        }
+      }
+    }));
+
     // Route53 alias record for the CloudFront distribution
     new route53.ARecord(this, `${prefix}PortfolioAliasRecord`, {
       recordName: fullDomain,
@@ -193,7 +200,7 @@ export class PorfolioStack extends cdk.Stack {
 
     // CodePipeline
     const pipeline = new cp.Pipeline(this, `${prefix}PortfolioPipeline`, {
-      pipelineName: "PortfolioPipeline",
+      pipelineName: `${prefix}PortfolioPipeline`,
     });
 
     // Source Stage
