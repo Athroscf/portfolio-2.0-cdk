@@ -78,6 +78,12 @@ export class PorfolioStack extends cdk.Stack {
     // Create a function URL for the Lambda
     const functionUrl = emailFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
+      cors: {
+        allowedOrigins: [`https://${fullDomain}`],
+        allowedMethods: [lambda.HttpMethod.POST],
+        allowedHeaders: ["Content-Type", "X-Amz-Date", "Authorization", "X-Api-Key", "X-Amz-Security-Token"],
+        allowCredentials: true,
+      }
     });
 
     // Create a secret to store the Lambda function URL
