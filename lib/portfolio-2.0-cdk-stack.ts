@@ -75,20 +75,19 @@ export class PorfolioStack extends cdk.Stack {
       },
     });
 
-    // Create a secret to store the Lambda function URL
-    const functionUrlSecret = new sm.Secret(this, `${prefix}EmailFunctionSecret`, {
-      secretName: `${id}-${prefix}-function-url`,
-      description: "URL for the email sending Lambda Function",
-    });
-
     // Create a function URL for the Lambda
     const functionUrl = emailFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
     });
 
-    // Store te function URL in the secret
-    new sm.CfnSecret(this, `${prefix}FunctionUrlSecretValue`, {
-      secretString: functionUrl.url,
+    // Create a secret to store the Lambda function URL
+    const functionUrlSecret = new sm.Secret(this, `${prefix}EmailFunctionSecret`, {
+      secretName: `${this.stackName}-${prefix}-function-url`,
+      description: "URL for the email sending Lambda Function",
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ url: functionUrl.url }),
+        generateStringKey: "dummy",
+      }
     })
 
     // CloudFront distribution
@@ -163,7 +162,7 @@ export class PorfolioStack extends cdk.Stack {
           pre_build: {
             commands: [
               "pnpm install",
-              "export FUNCTION_URL=$(aws secretsmanager get-secret-value --secret-id ${functionUrlSecret.secretName} --query SecretString --output text)",
+              `export FUNCTION_URL=$(aws secretsmanager get-secret-value --secret-id "${functionUrlSecret.secretName}" --query SecretString --output text | jq -r .url)`,
             ],
           },
           build: {
