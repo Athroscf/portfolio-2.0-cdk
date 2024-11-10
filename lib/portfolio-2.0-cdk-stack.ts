@@ -7,9 +7,11 @@ import * as cp from "aws-cdk-lib/aws-codepipeline";
 import * as cpa from "aws-cdk-lib/aws-codepipeline-actions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as r53t from "aws-cdk-lib/aws-route53-targets";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ses from "aws-cdk-lib/aws-ses";
 import * as sm from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 
@@ -24,6 +26,7 @@ export class PorfolioStack extends cdk.Stack {
     const domainName = "christopher-fiallos.com";
     const githubOwner = "Athroscf";
     const githubRepo = "portfolio-2.0";
+
     // Fetch secrets
     const githubSecret = sm.Secret.fromSecretNameV2(this, "GithubSecret", "github-oauth-token-3");
     const resendApiSecret = sm.Secret.fromSecretNameV2(
@@ -71,17 +74,23 @@ export class PorfolioStack extends cdk.Stack {
       handler: "index.handler",
       code: lambda.Code.fromAsset("lambda"),
       environment: {
-        RESEND_API_KEY: process.env.RESEND_API_KEY || "",
+        RESEND_API_KEY_SECRET_NAME: resendApiSecret.secretName,
       },
+      timeout: cdk.Duration.seconds(5),
+      memorySize: 256,
+      logRetention: logs.RetentionDays.ONE_WEEK,
     });
+
+    // Grant the Lambda function permission to read the secret
+    resendApiSecret.grantRead(emailFunction);
 
     // Create a function URL for the Lambda
     const functionUrl = emailFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
-        allowedOrigins: [`https://${fullDomain}`],
+        allowedOrigins: [`https://${fullDomain}`, `https://${environmentPrefix}${fullDomain}`],
         allowedMethods: [lambda.HttpMethod.POST],
-        allowedHeaders: ["Content-Type", "X-Amz-Date", "Authorization", "X-Api-Key", "X-Amz-Security-Token"],
+        allowedHeaders: ['Content-Type', 'X-Amz-Date', 'Authorization', 'X-Api-Key', 'X-Amz-Security-Token'],
         allowCredentials: true,
       }
     });
@@ -189,18 +198,11 @@ export class PorfolioStack extends cdk.Stack {
       }),
       environment: {
         buildImage: cb.LinuxBuildImage.STANDARD_5_0,
-        environmentVariables: {
-          RESEND_API_KEY: {
-            type: cb.BuildEnvironmentVariableType.SECRETS_MANAGER,
-            value: resendApiSecret.secretArn,
-          },
-        },
       },
     });
 
     // Grant permissions
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    resendApiSecret.grantRead(buildProject.role!);
     functionUrlSecret.grantRead(buildProject.role!);
 
     // CodePipeline
